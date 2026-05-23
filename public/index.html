@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TutAR Notebook — AI Lesson Plan Generator</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<!-- Drag-drop overlay (hidden by default) -->
+<div id="dropOverlay" class="drop-overlay hidden">
+  <div class="drop-content">
+    <div class="drop-icon">📚</div>
+    <h2>Drop your PDF here</h2>
+    <p>Release to start uploading</p>
+  </div>
+</div>
+
+<!-- ── AUTH SCREEN ── -->
+<div id="authScreen" class="auth-screen">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="logo-box">T</div>
+      <h1>TutAR Notebook</h1>
+    </div>
+    <p class="auth-sub">AI-powered lesson plans from your textbooks</p>
+
+    <div class="auth-tabs">
+      <button class="tab active" data-tab="login">Login</button>
+      <button class="tab" data-tab="signup">Sign Up</button>
+    </div>
+
+    <div id="loginForm" class="auth-form">
+      <input type="email" id="loginEmail" placeholder="Email" />
+      <input type="password" id="loginPassword" placeholder="Password" />
+      <button class="btn-primary" onclick="login()">Login</button>
+      <div id="loginError" class="error-msg"></div>
+    </div>
+
+    <div id="signupForm" class="auth-form hidden">
+      <input type="text" id="signupName" placeholder="Your name" />
+      <input type="email" id="signupEmail" placeholder="Email" />
+      <input type="password" id="signupPassword" placeholder="Password (min 6 chars)" />
+      <button class="btn-primary" onclick="signup()">Create Account</button>
+      <div id="signupError" class="error-msg"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── MAIN APP ── -->
+<div id="mainApp" class="main-app hidden">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-logo">
+      <div class="logo-box">T</div>
+      <span>TutAR Notebook</span>
+    </div>
+
+    <button class="btn-upload" onclick="showUploadModal()">
+      <span style="font-size:18px">+</span> Upload Textbook
+    </button>
+
+    <div class="sidebar-section">
+      <div class="section-title">My Books</div>
+      <div id="bookList" class="book-list"></div>
+    </div>
+
+    <div class="sidebar-bottom">
+      <div class="user-card">
+        <div class="user-avatar" id="userAvatar">?</div>
+        <div class="user-info">
+          <div id="userName" class="user-name">Loading...</div>
+          <a class="logout-link" onclick="logout()">Logout</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Content -->
+  <div class="main">
+
+    <!-- Welcome State -->
+    <div id="welcomeState" class="welcome-state">
+      <div class="welcome-icon">📚</div>
+      <h2>Welcome to TutAR Notebook</h2>
+      <p>Upload a textbook to get started.<br>Then ask any topic and we'll generate a lesson plan based on that book.</p>
+      <button class="btn-primary" onclick="showUploadModal()">Upload Your First Textbook</button>
+    </div>
+
+    <!-- Book Selected State -->
+    <div id="bookView" class="book-view hidden">
+      <div class="book-header">
+        <div>
+          <h2 id="selectedBookTitle">Book Title</h2>
+          <p class="book-meta" id="selectedBookMeta">Class · Subject</p>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn-secondary" onclick="regenerateTopics()" id="regenTopicsBtn">🔄 Regenerate Topics</button>
+          <button class="btn-delete" onclick="deleteCurrentBook()">Delete Book</button>
+        </div>
+      </div>
+
+      <div class="search-section">
+        <h3>Generate Lesson Plan</h3>
+        <div class="search-row">
+          <input type="text" id="topicInput" placeholder="Enter a topic (e.g. Magnetism, Photosynthesis, Newton's Laws)" />
+          <button class="btn-primary" onclick="generateLesson()">Generate</button>
+        </div>
+        <div class="hint">The AI will search this textbook only and generate a lesson plan based on its content.</div>
+
+        <!-- Suggested Topics -->
+        <div id="suggestedTopics" class="suggested-topics hidden">
+          <div class="suggested-label">💡 Suggested topics from this book:</div>
+          <div id="topicChips" class="topic-chips"></div>
+        </div>
+      </div>
+
+      <!-- Loading -->
+      <div id="generateLoading" class="loading hidden">
+        <div class="spinner"></div>
+        <p>Searching textbook and generating lesson plan...</p>
+      </div>
+
+      <!-- Lesson Plan Output -->
+      <div id="lessonOutput" class="lesson-output hidden">
+        <div class="lesson-header">
+          <h3>📋 Lesson Plan</h3>
+          <span id="lessonMeta" class="lesson-meta"></span>
+        </div>
+        <div id="lessonContent" class="lesson-content"></div>
+
+        <div class="sources-section">
+          <h4>📖 Source Excerpts from Textbook</h4>
+          <div id="sourcesList" class="sources-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── UPLOAD MODAL ── -->
+<div id="uploadModal" class="modal hidden">
+  <div class="modal-overlay" onclick="hideUploadModal()"></div>
+  <div class="modal-content">
+    <div class="modal-header">
+      <h2>Upload Textbook</h2>
+      <button class="modal-close" onclick="hideUploadModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <label>Book Title</label>
+      <input type="text" id="uploadTitle" placeholder="e.g. NCERT Class 6 Science" />
+
+      <label>Class</label>
+      <select id="uploadClass">
+        <option value="">Select class</option>
+        <option>Kindergarten</option>
+        <option>Class 1</option>
+        <option>Class 2</option>
+        <option>Class 3</option>
+        <option>Class 4</option>
+        <option>Class 5</option>
+        <option>Class 6</option>
+        <option>Class 7</option>
+        <option>Class 8</option>
+        <option>Class 9</option>
+        <option>Class 10</option>
+        <option>Class 11</option>
+        <option>Class 12</option>
+      </select>
+
+      <label>Subject</label>
+      <input type="text" id="uploadSubject" placeholder="e.g. Science, Maths, Biology" />
+
+      <label>PDF File (max 50 MB)</label>
+      <input type="file" id="uploadFile" accept="application/pdf" />
+
+      <div id="uploadError" class="error-msg"></div>
+      <div id="uploadProgress" class="hidden">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+        <div class="progress-text" id="progressText">Uploading...</div>
+      </div>
+
+      <div class="modal-actions">
+        <button class="btn-secondary" onclick="hideUploadModal()">Cancel</button>
+        <button class="btn-primary" id="uploadBtn" onclick="uploadBook()">Upload & Process</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="app.js"></script>
+</body>
+</html>
