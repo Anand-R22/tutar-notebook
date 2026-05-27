@@ -39,7 +39,25 @@ const supabaseAdmin = createClient(
 );
 const pinecone = new Pinecone({ apiKey: process.env.PINECONE_API_KEY });
 const pineconeIndex = pinecone.index(process.env.PINECONE_INDEX || "tutar-textbooks");
+const modelsIndex = pinecone.index(process.env.PINECONE_MODELS_INDEX || "tutar-models");
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+// ── External API keys ──
+const GOOGLE_SEARCH_API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
+const GOOGLE_SEARCH_ENGINE_ID = process.env.GOOGLE_SEARCH_ENGINE_ID;
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+
+// ── AI Generation via Gemini ──
+async function generateAI(prompt) {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+    const result = await model.generateContent(prompt);
+    return result.response.text();
+  } catch (err) {
+    console.error("Gemini error:", err.message.substring(0, 200));
+    throw err;
+  }
+}
 
 // ── Middleware ──
 app.use(express.json({ limit: "10mb" }));
@@ -216,7 +234,6 @@ app.post("/api/upload", upload.single("pdf"), async (req, res) => {
           }
           const sampleText = sampleChunks.join("\n\n---\n\n").slice(0, 8000);
 
-          const topicModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
           const topicPrompt = `Analyze the following textbook content and extract 8-10 main academic topics that a teacher could create lesson plans about.
 
 Return ONLY a valid JSON array of short topic names (2-4 words each). No explanation, no markdown, just the JSON array.
@@ -229,8 +246,7 @@ Example output format:
 
 Your response (JSON array only):`;
 
-          const topicResult = await topicModel.generateContent(topicPrompt);
-          let topicText = topicResult.response.text().trim();
+          let topicText = (await generateAI(topicPrompt)).trim();
 
           // Clean up common Gemini response patterns
           topicText = topicText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
@@ -379,7 +395,6 @@ app.post("/api/books/:id/regenerate-topics", async (req, res) => {
       .join("\n\n---\n\n")
       .slice(0, 8000);
 
-    const topicModel = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
     const topicPrompt = `Analyze the following textbook content and extract 8-10 main academic topics that a teacher could create lesson plans about.
 
 Return ONLY a valid JSON array of short topic names (2-4 words each). No explanation, no markdown, just the JSON array.
@@ -392,8 +407,7 @@ Example output format:
 
 Your response (JSON array only):`;
 
-    const topicResult = await topicModel.generateContent(topicPrompt);
-    let topicText = topicResult.response.text().trim();
+    let topicText = (await generateAI(topicPrompt)).trim();
     topicText = topicText.replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "").trim();
 
     const jsonMatch = topicText.match(/\[[\s\S]*?\]/);
@@ -420,7 +434,176 @@ Your response (JSON array only):`;
   }
 });
 
-// POST /api/generate — generate lesson plan
+// ── Helper: Search Google for images (single query) ──
+// ── Helper: Search Wikipedia for images (FREE, no API key) ──
+async function searchImages(query, num = 6) {
+  try {
+    // Step 1: Search Wikipedia for relevant pages
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&origin=*&srlimit=3`;
+    const searchRes = await fetch(searchUrl);
+    const searchData = await searchRes.json();
+    const pages = searchData.query?.search || [];
+
+    if (pages.length === 0) return [];
+
+    // Step 2: For each page, get its images
+    const pageImages = [];
+    for (const page of pages) {
+      try {
+        const pageTitle = page.title;
+        // Get page images via the prop=pageimages and imageinfo
+        const imgUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(pageTitle)}&prop=images&format=json&origin=*&imlimit=10`;
+        const imgRes = await fetch(imgUrl);
+        const imgData = await imgRes.json();
+        const pagesData = imgData.query?.pages || {};
+        const pageData = Object.values(pagesData)[0];
+        const images = pageData?.images || [];
+
+        // Filter out icons/logos, prefer actual content images
+        const goodImages = images.filter(img => {
+          const fname = img.title.toLowerCase();
+          return !fname.includes("commons-logo") &&
+                 !fname.includes("edit-icon") &&
+                 !fname.includes("wiki.png") &&
+                 !fname.includes("disambig") &&
+                 !fname.includes("ambox") &&
+                 !fname.endsWith(".svg") &&
+                 (fname.endsWith(".jpg") || fname.endsWith(".jpeg") ||
+                  fname.endsWith(".png") || fname.endsWith(".gif"));
+        });
+
+        // Get actual image URLs for the good ones
+        for (const img of goodImages.slice(0, 3)) {
+          const fileName = img.title; // e.g. "File:Photosynthesis.png"
+          const fileInfoUrl = `https://en.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(fileName)}&prop=imageinfo&iiprop=url|size&format=json&origin=*&iiurlwidth=600`;
+          const fileRes = await fetch(fileInfoUrl);
+          const fileData = await fileRes.json();
+          const fileInfo = Object.values(fileData.query?.pages || {})[0]?.imageinfo?.[0];
+
+          if (fileInfo && fileInfo.thumburl) {
+            pageImages.push({
+              title: fileName.replace("File:", "").replace(/\.[^.]+$/, "").replace(/_/g, " "),
+              link: fileInfo.url,
+              thumbnail: fileInfo.thumburl,
+              source: "Wikipedia",
+              contextLink: `https://en.wikipedia.org/wiki/${encodeURIComponent(pageTitle)}`,
+              query,
+            });
+
+            if (pageImages.length >= num) break;
+          }
+        }
+      } catch (e) {
+        console.warn(`  Wikipedia page image fetch failed for "${page.title}":`, e.message);
+      }
+      if (pageImages.length >= num) break;
+    }
+
+    return pageImages.slice(0, num);
+  } catch (err) {
+    console.warn("Wikipedia image search failed:", err.message);
+    return [];
+  }
+}
+
+// ── Helper: Run multiple image searches in parallel, dedupe ──
+async function searchImagesMulti(queries) {
+  if (!queries || queries.length === 0) return [];
+  const allResults = await Promise.all(queries.map(q => searchImages(q, 4)));
+  const seen = new Set();
+  const merged = [];
+  // Interleave results from each query so variety wins
+  const maxLen = Math.max(...allResults.map(r => r.length));
+  for (let i = 0; i < maxLen && merged.length < 8; i++) {
+    for (const result of allResults) {
+      if (i < result.length && !seen.has(result[i].link)) {
+        seen.add(result[i].link);
+        merged.push(result[i]);
+        if (merged.length >= 8) break;
+      }
+    }
+  }
+  return merged;
+}
+
+// ── Helper: Search YouTube for videos ──
+async function searchYouTube(query) {
+  if (!YOUTUBE_API_KEY) return [];
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/search?key=${YOUTUBE_API_KEY}&q=${encodeURIComponent(query + " education tutorial")}&part=snippet&type=video&maxResults=6&videoEmbeddable=true&safeSearch=strict&relevanceLanguage=en`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.error) {
+      console.warn("YouTube error:", data.error.message);
+      return [];
+    }
+    return (data.items || []).map((item) => ({
+      videoId: item.id.videoId,
+      title: item.snippet.title,
+      description: item.snippet.description,
+      channel: item.snippet.channelTitle,
+      thumbnail: item.snippet.thumbnails.medium?.url || item.snippet.thumbnails.default?.url,
+      url: `https://www.youtube.com/watch?v=${item.id.videoId}`,
+      embedUrl: `https://www.youtube.com/embed/${item.id.videoId}`,
+      publishedAt: item.snippet.publishedAt,
+    }));
+  } catch (err) {
+    console.warn("YouTube search failed:", err.message);
+    return [];
+  }
+}
+
+// ── Helper: Search 3D models from tutar-models index ──
+async function search3DModels(queryVector, className, subject) {
+  try {
+    // Map class names to match tutar-models index format
+    // tutar-models uses formats like "6", "11", "Kindergarten" (not "Class 6")
+    let classFilter = className;
+    if (classFilter && classFilter.startsWith("Class ")) {
+      classFilter = classFilter.replace("Class ", "");
+    }
+
+    // Try filtered search first
+    const filter = {};
+    if (classFilter) filter.class = { $eq: classFilter };
+    if (subject) filter.subject = { $eq: subject };
+
+    let response;
+    if (Object.keys(filter).length > 0) {
+      response = await modelsIndex.query({
+        vector: queryVector,
+        topK: 8,
+        filter,
+        includeMetadata: true,
+      });
+    }
+
+    // If no/few results with filter, broaden
+    if (!response || !response.matches || response.matches.length < 3) {
+      response = await modelsIndex.query({
+        vector: queryVector,
+        topK: 8,
+        includeMetadata: true,
+      });
+    }
+
+    if (!response.matches || response.matches.length === 0) return [];
+
+    const maxScore = response.matches[0].score || 1;
+    return response.matches.map((m) => ({
+      name: m.metadata.name,
+      class: m.metadata.class,
+      subject: m.metadata.subject,
+      topic: m.metadata.topic,
+      relevance: Math.round((m.score / maxScore) * 100),
+    }));
+  } catch (err) {
+    console.warn("3D models search failed:", err.message);
+    return [];
+  }
+}
+
+// POST /api/generate — generate full content package
 app.post("/api/generate", async (req, res) => {
   try {
     const user = await authenticate(req);
@@ -444,12 +627,12 @@ app.post("/api/generate", async (req, res) => {
       return res.status(400).json({ error: `Book is not ready yet (status: ${book.status})` });
     }
 
-    console.log(`🔍 Generating lesson plan: "${topic}" from "${book.title}"`);
+    console.log(`🔍 Generating full content: "${topic}" from "${book.title}"`);
 
     // 1. Embed the topic
     const queryVector = await embed(topic);
 
-    // 2. Search Pinecone for relevant chunks (only from this book)
+    // 2. Search textbook chunks (filtered by book)
     const searchResult = await pineconeIndex.query({
       vector: queryVector,
       topK: 12,
@@ -457,15 +640,7 @@ app.post("/api/generate", async (req, res) => {
       includeMetadata: true,
     });
 
-    if (!searchResult.matches || searchResult.matches.length === 0) {
-      return res.json({
-        lessonPlan: "No relevant content found in this textbook for the given topic. Try a different topic or check the book content.",
-        sources: [],
-      });
-    }
-
-    // 3. Assemble context from chunks
-    const contextChunks = searchResult.matches.map((m, i) => ({
+    const contextChunks = (searchResult.matches || []).map((m, i) => ({
       chunk: m.metadata.chunk_text,
       score: m.score,
       index: m.metadata.chunk_index,
@@ -475,74 +650,203 @@ app.post("/api/generate", async (req, res) => {
       .map((c, i) => `[Excerpt ${i + 1}]\n${c.chunk}`)
       .join("\n\n");
 
-    // 4. Generate lesson plan with Gemini
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
+    // 3. Run all generation tasks in parallel using generateAI wrapper
 
-    const prompt = `You are an expert educational assistant creating a concise, practical lesson plan for a teacher.
+    // -- Content prompt: detailed explanation (textbook + general knowledge) --
+    const contentPrompt = `You are an expert educational content writer.
 
-The teacher wants to teach the topic: "${topic}"
+Topic: "${topic}"
+Class/Grade: ${book.class_name}
+Subject: ${book.subject}
+
+Below are excerpts from the student's textbook. Use them as the foundation, but ALSO supplement with your general academic knowledge to give a complete, accurate explanation suitable for ${book.class_name}.
+
+TEXTBOOK EXCERPTS:
+${context || "(No textbook excerpts available — use your knowledge)"}
+
+Write a detailed, well-structured explanation of "${topic}" with these sections (use ## markdown):
+
+## Introduction
+2-3 sentences introducing the topic.
+
+## Detailed Explanation
+The main content. Use sub-headings (###) for sub-topics. Include:
+- Clear definitions
+- How it works / mechanism
+- Examples
+- Formulas / equations / chemical reactions (if applicable) with proper notation (H₂O, CO₂, →, etc.)
+
+## Real-World Applications
+2-4 practical examples or applications.
+
+## Key Takeaways
+3-5 bullet points summarizing the most important facts.
+
+## Common Misconceptions
+1-2 common mistakes students make about this topic.
+
+RULES:
+- Use clear, age-appropriate language for ${book.class_name}
+- Combine textbook information with your knowledge for completeness
+- Use proper scientific notation
+- Be thorough but not verbose
+- Avoid ASCII art diagrams (no text boxes made from -, |, +, etc.) — describe processes in prose or numbered lists instead
+- For chemical equations: inline notation like 6CO₂ + 6H₂O → C₆H₁₂O₆ + 6O₂
+- For math equations: LaTeX like $E = mc^2$ or $$F = ma$$`;
+
+    // -- Lesson plan prompt (existing) --
+    const lessonPrompt = `You are an expert educational assistant creating a concise lesson plan.
+
+Topic: "${topic}"
 Class/Grade: ${book.class_name}
 Subject: ${book.subject}
 Textbook: ${book.title}
 
 Based ONLY on the following excerpts from the textbook, generate a SHORT and PRACTICAL lesson plan.
-Do NOT use general knowledge — use only the information present in these excerpts.
 
 TEXTBOOK EXCERPTS:
-${context}
+${context || "(Use general academic knowledge for this topic)"}
 
 Generate a CONCISE lesson plan with EXACTLY these section headings (use ## markdown):
 
 ## Lesson Objective
-One clear sentence — what students will learn.
+One clear sentence.
 
 ## Key Concepts
-3-5 bullet points. Format each as: **Concept Name** — short definition. Formula if any.
+3-5 bullet points. Format: **Concept Name** — short definition.
 
 ## Lesson Flow
 
 ### Introduction (5 min)
 - One hook question
-- Brief topic introduction
+- Brief introduction
 
 ### Main Teaching (20 min)
 - 3-5 concise teaching points
-- Include key formulas/reactions where mentioned in excerpts
-- Reference excerpts briefly: "(Excerpt 1)"
+- Include key formulas/reactions if applicable
 
 ### Activity (10 min)
-- One practical activity (diagram/problem/discussion)
+- One practical activity
 
 ### Conclusion (5 min)
-- Quick recap of 2-3 main points
+- Quick recap
 
 ## Key Formulas
-Only if present in excerpts. List them clearly with proper notation.
-If none, write "None present in the excerpts."
+List formulas if applicable, else write "None applicable."
 
 ## Practice Questions
-3 brief mixed conceptual/numerical questions.
+3 brief questions.
 
 ## Discussion Questions
-2 brief questions to gauge understanding.
-
----
+2 brief questions.
 
 RULES:
-- Use EXACTLY the section headings shown above (## for sections, ### for sub-sections)
-- Use bullet points heavily, not paragraphs
-- Use proper notation: H₂O, CO₂, E = mc², A → B
-- Language suitable for ${book.class_name}
-- Keep each section SHORT
-- DO NOT pad with unnecessary text`;
+- Use EXACT section headings shown above
+- Bullet points, not paragraphs
+- Proper notation: H₂O, CO₂, E = mc², A → B
+- Suitable for ${book.class_name}`;
 
-    const result = await model.generateContent(prompt);
-    const lessonPlan = result.response.text();
+    // -- MCQ prompt --
+    const mcqPrompt = `You are an expert educational assessment creator.
 
-    console.log(`✅ Lesson plan generated (${lessonPlan.length} chars)`);
+Topic: "${topic}"
+Class/Grade: ${book.class_name}
+Subject: ${book.subject}
+
+Based on the topic and these textbook excerpts (combined with your knowledge), create 5 multiple-choice questions to test student understanding.
+
+TEXTBOOK EXCERPTS:
+${context || "(Use your knowledge)"}
+
+Return ONLY a valid JSON array. Each question must have this exact structure:
+[
+  {
+    "question": "What is...",
+    "options": ["Option A", "Option B", "Option C", "Option D"],
+    "correctIndex": 2,
+    "explanation": "Brief explanation of why this answer is correct."
+  }
+]
+
+RULES:
+- Exactly 5 questions
+- Each has exactly 4 options
+- correctIndex is the index (0-3) of the correct option
+- Mix difficulty: 2 easy, 2 medium, 1 hard
+- Cover different aspects of the topic
+- Age-appropriate for ${book.class_name}
+- Return ONLY JSON, no markdown fences, no explanation text`;
+
+    // Execute all in parallel
+    console.log(`  ↪ Running parallel generation tasks...`);
+    const [
+      contentResult,
+      lessonResult,
+      mcqResult,
+      models3D,
+      videos,
+    ] = await Promise.all([
+      generateAI(contentPrompt).catch(e => {
+        console.warn("Content generation failed:", e.message);
+        return "";
+      }),
+      generateAI(lessonPrompt).catch(e => {
+        console.warn("Lesson generation failed:", e.message);
+        return "";
+      }),
+      generateAI(mcqPrompt).catch(e => {
+        console.warn("MCQ generation failed:", e.message);
+        return "";
+      }),
+      search3DModels(queryVector, book.class_name, book.subject),
+      searchYouTube(`${topic} ${book.subject} ${book.class_name} explained`),
+    ]);
+
+    // ── Image search via Wikipedia (FREE, no API key) ──
+    const ENABLE_IMAGE_SEARCH = true;
+    let images = [];
+    if (ENABLE_IMAGE_SEARCH) {
+      // Wikipedia works better with clean topic names (no extra modifiers)
+      const imageQueries = [
+        topic,
+        `${topic} ${book.subject}`,
+      ];
+      console.log(`  ↪ Wikipedia image queries: ${imageQueries.join(" | ")}`);
+      images = await searchImagesMulti(imageQueries);
+      console.log(`  ↪ Found ${images.length} images from Wikipedia`);
+    } else {
+      console.log(`  ↪ Image search disabled`);
+    }
+
+    // Parse MCQs
+    let mcqs = [];
+    try {
+      let mcqText = mcqResult.trim()
+        .replace(/^```(?:json)?\s*/i, "")
+        .replace(/```\s*$/, "")
+        .trim();
+      const jsonMatch = mcqText.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        mcqs = JSON.parse(jsonMatch[0]);
+        // Validate each MCQ
+        mcqs = mcqs.filter(q =>
+          q.question && Array.isArray(q.options) && q.options.length === 4 &&
+          typeof q.correctIndex === "number" && q.correctIndex >= 0 && q.correctIndex < 4
+        );
+      }
+    } catch (e) {
+      console.warn("MCQ parse failed:", e.message);
+    }
+
+    console.log(`✅ Generated: content=${!!contentResult}, lesson=${!!lessonResult}, mcqs=${mcqs.length}, models=${models3D.length}, images=${images.length}, videos=${videos.length}`);
 
     res.json({
-      lessonPlan,
+      content: contentResult,
+      lessonPlan: lessonResult,
+      mcqs,
+      models3D,
+      images,
+      videos,
       sources: contextChunks.map((c, i) => ({
         excerptNumber: i + 1,
         relevance: Math.round(c.score * 100),
@@ -552,6 +856,8 @@ RULES:
         chunksUsed: contextChunks.length,
         topic,
         book: book.title,
+        className: book.class_name,
+        subject: book.subject,
       },
     });
 

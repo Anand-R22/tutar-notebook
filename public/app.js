@@ -391,32 +391,564 @@ async function generateLesson() {
       return;
     }
 
-    // Render lesson plan
+    // Render everything
     document.getElementById("lessonOutput").classList.remove("hidden");
     document.getElementById("lessonMeta").textContent =
-      `${data.stats.chunksUsed} sources`;
-    renderLessonPlan(data);
+      `${data.stats.chunksUsed} textbook sources`;
 
-    // Render sources
-    const sourcesList = document.getElementById("sourcesList");
-    sourcesList.innerHTML = "";
-    data.sources.forEach((src) => {
-      const item = document.createElement("div");
-      item.className = "source-item";
-      item.innerHTML = `
-        <div class="source-item-header">
-          <span>Excerpt ${src.excerptNumber}</span>
-          <span class="source-relevance">${src.relevance}% match</span>
-        </div>
-        <div>${src.preview}</div>
-      `;
-      sourcesList.appendChild(item);
-    });
+    renderFullContent(data);
 
   } catch (err) {
     document.getElementById("generateLoading").classList.add("hidden");
     alert("Failed to generate: " + err.message);
   }
+}
+
+// ══════════════════════════════════════════════
+// Insert images inline in content after major headings
+function insertImagesInContent(html, images) {
+  if (!images || images.length === 0) return html;
+
+  // Parse HTML and find <h2> tags
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(`<div>${html}</div>`, "text/html");
+  const wrapper = doc.body.firstChild;
+  const h2s = wrapper.querySelectorAll("h2");
+
+  // Distribute images across headings (1 image per heading max, skip first)
+  const imagesToUse = images.slice(0, Math.min(h2s.length, 3));
+
+  imagesToUse.forEach((img, i) => {
+    const targetH2 = h2s[i + 1] || h2s[i]; // Place after 2nd, 3rd, 4th headings
+    if (!targetH2) return;
+
+    const figure = doc.createElement("figure");
+    figure.className = "inline-figure";
+    figure.innerHTML = `
+      <a href="${escapeAttr(img.contextLink)}" target="_blank" rel="noopener">
+        <img src="${escapeAttr(img.thumbnail)}" alt="${escapeAttr(img.title)}" loading="lazy" onerror="this.parentElement.parentElement.style.display='none'"/>
+      </a>
+      <figcaption>${escapeHtml(img.title || "")} <span class="figure-source">— ${escapeHtml(img.source)}</span></figcaption>
+    `;
+
+    // Insert AFTER the heading (and any immediately following paragraph)
+    let insertAfter = targetH2;
+    const next = targetH2.nextElementSibling;
+    if (next && next.tagName === "P") insertAfter = next;
+
+    insertAfter.parentNode.insertBefore(figure, insertAfter.nextSibling);
+  });
+
+  return wrapper.innerHTML;
+}
+
+// Full content renderer (content + lesson + 3D + images + videos + MCQ)
+// ══════════════════════════════════════════════
+function renderFullContent(data) {
+  const container = document.getElementById("lessonContent");
+  let html = "";
+
+  // 1. Stats banner
+  html += renderStatsBanner(data);
+
+  // 2. Content section (detailed explanation)
+  if (data.content) {
+    html += `
+      <div class="content-card content-section">
+        <div class="content-header">
+          <div class="content-icon">📖</div>
+          <h3 class="content-title">Topic Content</h3>
+          <span class="content-badge">Detailed explanation</span>
+        </div>
+        <div class="content-body">${marked.parse(cleanASCIIArt(data.content))}</div>
+      </div>
+    `;
+  }
+
+  // 3. Lesson Plan section
+  if (data.lessonPlan) {
+    html += `
+      <div class="content-card content-lesson">
+        <div class="content-header">
+          <div class="content-icon">📋</div>
+          <h3 class="content-title">Lesson Plan</h3>
+          <span class="content-badge">40 min class</span>
+        </div>
+        <div class="content-body">
+          <div id="lessonPlanInner"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 4. 3D Models section
+  if (data.models3D && data.models3D.length > 0) {
+    html += `
+      <div class="content-card content-models">
+        <div class="content-header">
+          <div class="content-icon">🎲</div>
+          <h3 class="content-title">3D Models</h3>
+          <span class="content-badge">${data.models3D.length} models</span>
+        </div>
+        <div class="content-body">
+          <div class="models-grid">
+            ${data.models3D.map(m => `
+              <div class="model-card">
+                <div class="model-icon">🎯</div>
+                <div class="model-info">
+                  <div class="model-name">${escapeHtml(m.name)}</div>
+                  <div class="model-meta">
+                    <span class="model-tag">Class ${escapeHtml(m.class)}</span>
+                    <span class="model-tag">${escapeHtml(m.subject)}</span>
+                  </div>
+                  ${m.topic ? `<div class="model-topic">${escapeHtml(m.topic)}</div>` : ""}
+                </div>
+                <div class="model-score">${m.relevance}%</div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 5. Images section — organized by AI-generated query categories
+  if (data.images && data.images.length > 0) {
+    // Group images by their AI-generated query
+    const grouped = {};
+    data.images.forEach(img => {
+      const cat = img.query || "Related";
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(img);
+    });
+
+    const categories = Object.keys(grouped);
+    const hasMultipleCategories = categories.length > 1;
+
+    html += `
+      <div class="content-card content-images">
+        <div class="content-header">
+          <div class="content-icon">🖼️</div>
+          <h3 class="content-title">Content-Related Images</h3>
+          <span class="content-badge">${data.images.length} images${hasMultipleCategories ? ` · ${categories.length} categories` : ""}</span>
+        </div>
+        <div class="content-body">
+          ${categories.map(cat => `
+            ${hasMultipleCategories ? `
+              <div class="image-category-header">
+                <span class="image-category-icon">🔍</span>
+                <span class="image-category-title">${escapeHtml(cat)}</span>
+                <span class="image-category-count">${grouped[cat].length} images</span>
+              </div>
+            ` : ""}
+            <div class="images-grid-large">
+              ${grouped[cat].map(img => `
+                <a href="${escapeAttr(img.contextLink)}" target="_blank" rel="noopener" class="image-card-large" title="${escapeAttr(img.title)}">
+                  <div class="image-thumb-wrap">
+                    <img src="${escapeAttr(img.thumbnail)}" alt="${escapeAttr(img.title)}" loading="lazy" onerror="this.parentElement.parentElement.style.display='none'"/>
+                    <div class="image-zoom-icon">🔍</div>
+                  </div>
+                  <div class="image-info">
+                    <div class="image-title">${escapeHtml(img.title || "Untitled")}</div>
+                    <div class="image-source-line">
+                      <span class="image-source-icon">🌐</span>
+                      <span class="image-source-name">${escapeHtml(img.source)}</span>
+                    </div>
+                  </div>
+                </a>
+              `).join("")}
+            </div>
+          `).join("")}
+        </div>
+      </div>
+    `;
+  }
+
+  // 6. Videos section
+  if (data.videos && data.videos.length > 0) {
+    html += `
+      <div class="content-card content-videos">
+        <div class="content-header">
+          <div class="content-icon">📹</div>
+          <h3 class="content-title">YouTube Videos</h3>
+          <span class="content-badge">${data.videos.length} videos</span>
+        </div>
+        <div class="content-body">
+          <div class="videos-grid">
+            ${data.videos.map(v => `
+              <a href="${escapeHtml(v.url)}" target="_blank" rel="noopener" class="video-card">
+                <div class="video-thumb">
+                  <img src="${escapeHtml(v.thumbnail)}" alt="${escapeHtml(v.title)}" loading="lazy"/>
+                  <div class="video-play">▶</div>
+                </div>
+                <div class="video-info">
+                  <div class="video-title">${escapeHtml(v.title)}</div>
+                  <div class="video-channel">${escapeHtml(v.channel)}</div>
+                </div>
+              </a>
+            `).join("")}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 7. MCQ Section
+  if (data.mcqs && data.mcqs.length > 0) {
+    html += renderMCQSection(data.mcqs);
+  }
+
+  // 8. Sources
+  if (data.sources && data.sources.length > 0) {
+    html += `
+      <div class="content-card content-sources">
+        <div class="content-header">
+          <div class="content-icon">📑</div>
+          <h3 class="content-title">Source Excerpts from Textbook</h3>
+          <span class="content-badge">${data.sources.length} excerpts</span>
+        </div>
+        <div class="content-body">
+          <div class="sources-list">
+            ${data.sources.map(src => `
+              <div class="source-item">
+                <div class="source-item-header">
+                  <span>Excerpt ${src.excerptNumber}</span>
+                  <span class="source-relevance">${src.relevance}% match</span>
+                </div>
+                <div>${escapeHtml(src.preview)}</div>
+              </div>
+            `).join("")}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  container.innerHTML = html;
+
+  // Render lesson plan inside its container (uses fancy parser)
+  if (data.lessonPlan) {
+    const inner = document.getElementById("lessonPlanInner");
+    if (inner) inner.innerHTML = renderLessonPlanHTML(data.lessonPlan);
+  }
+
+  // Render LaTeX math formulas (after all content is in DOM)
+  renderMath(container);
+
+  // Setup MCQ interactions
+  setupMCQHandlers();
+}
+
+// Render LaTeX math using KaTeX
+function renderMath(container) {
+  if (typeof renderMathInElement === "undefined") {
+    // KaTeX not loaded yet, retry after delay
+    setTimeout(() => renderMath(container), 200);
+    return;
+  }
+  try {
+    renderMathInElement(container, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "$", right: "$", display: false },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "\\[", right: "\\]", display: true },
+      ],
+      throwOnError: false,
+      errorColor: "#EF4444",
+    });
+  } catch (e) {
+    console.warn("Math rendering failed:", e);
+  }
+}
+
+// Stats banner at top
+function renderStatsBanner(data) {
+  return `
+    <div class="lesson-banner">
+      <div class="banner-item">
+        <div class="banner-icon">🎯</div>
+        <div class="banner-text">
+          <div class="banner-label">Topic</div>
+          <div class="banner-value">${escapeHtml(data.stats.topic)}</div>
+        </div>
+      </div>
+      <div class="banner-item">
+        <div class="banner-icon">📚</div>
+        <div class="banner-text">
+          <div class="banner-label">From</div>
+          <div class="banner-value">${escapeHtml(data.stats.book)}</div>
+        </div>
+      </div>
+      <div class="banner-item">
+        <div class="banner-icon">📑</div>
+        <div class="banner-text">
+          <div class="banner-label">Sources</div>
+          <div class="banner-value">${data.stats.chunksUsed} excerpts</div>
+        </div>
+      </div>
+      <div class="banner-item banner-actions">
+        <button class="banner-btn" onclick="copyLessonPlan()">📋 Copy</button>
+        <button class="banner-btn" onclick="printLessonPlan()">🖨️ Print</button>
+      </div>
+    </div>
+  `;
+}
+
+// Render MCQ section with one-question-at-a-time navigation
+function renderMCQSection(mcqs) {
+  return `
+    <div class="content-card content-mcq">
+      <div class="content-header">
+        <div class="content-icon">✅</div>
+        <h3 class="content-title">Practice Quiz</h3>
+        <span class="content-badge" id="mcqProgress">Question 1 of ${mcqs.length}</span>
+      </div>
+      <div class="content-body">
+        <div id="mcqQuiz" class="mcq-content mcq-quiz-mode" data-mcqs='${escapeAttr(JSON.stringify(mcqs))}' data-current="0">
+          ${mcqs.map((q, qi) => `
+            <div class="mcq-item ${qi === 0 ? '' : 'hidden'}" data-q="${qi}" data-correct="${q.correctIndex}" data-answered="false">
+              <div class="mcq-question"><span class="mcq-num">${qi + 1}.</span> ${escapeHtml(q.question)}</div>
+              <div class="mcq-options mcq-options-interactive">
+                ${q.options.map((opt, oi) => `
+                  <div class="mcq-option mcq-option-clickable" data-opt="${oi}">
+                    <span class="mcq-letter">${String.fromCharCode(65 + oi)}.</span>
+                    <span>${escapeHtml(opt)}</span>
+                  </div>
+                `).join('')}
+              </div>
+              <div class="mcq-explanation mcq-explanation-hidden">
+                <strong>Explanation:</strong> ${escapeHtml(q.explanation || 'No explanation provided.')}
+              </div>
+            </div>
+          `).join('')}
+
+          <div class="mcq-nav">
+            <button class="mcq-nav-btn mcq-prev" onclick="mcqPrev()" disabled>← Previous</button>
+            <button class="mcq-submit-btn-single" onclick="mcqSubmitCurrent()">Submit Answer</button>
+            <button class="mcq-nav-btn mcq-next" onclick="mcqNext()">Next →</button>
+          </div>
+
+          <div id="quizResult" class="quiz-result hidden"></div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function escapeAttr(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+// Strip ASCII art diagrams that the AI sometimes generates inside code blocks
+function cleanASCIIArt(text) {
+  if (!text) return "";
+  // Only remove code blocks that contain mostly ASCII art characters
+  return text.replace(/```[\s\S]*?```/g, (block) => {
+    const artChars = (block.match(/[\-+|=_\\\/]/g) || []).length;
+    const totalChars = block.length;
+    // If more than 30% of the block is ASCII art chars → remove it
+    if (totalChars > 0 && artChars / totalChars > 0.3) {
+      return "";
+    }
+    return block;
+  });
+}
+
+// Set up click handlers on MCQ options
+function setupMCQHandlers() {
+  document.querySelectorAll(".mcq-option-clickable").forEach(opt => {
+    opt.addEventListener("click", function() {
+      const item = this.closest(".mcq-item");
+      if (item.dataset.answered === "true") return; // Lock once answered
+
+      const parent = this.closest(".mcq-options");
+      parent.querySelectorAll(".mcq-option-clickable").forEach(o => o.classList.remove("mcq-selected"));
+      this.classList.add("mcq-selected");
+    });
+  });
+}
+
+// Get current MCQ data
+function getMCQState() {
+  const quizContainer = document.getElementById("mcqQuiz");
+  if (!quizContainer) return null;
+  const current = parseInt(quizContainer.dataset.current || "0");
+  const items = quizContainer.querySelectorAll(".mcq-item");
+  return { quizContainer, current, items, total: items.length };
+}
+
+// Show specific question
+function mcqShowQuestion(index) {
+  const state = getMCQState();
+  if (!state) return;
+
+  state.items.forEach((item, i) => {
+    item.classList.toggle("hidden", i !== index);
+  });
+
+  state.quizContainer.dataset.current = index;
+
+  // Update progress badge
+  const progressEl = document.getElementById("mcqProgress");
+  if (progressEl) progressEl.textContent = `Question ${index + 1} of ${state.total}`;
+
+  // Update nav buttons
+  const prevBtn = state.quizContainer.querySelector(".mcq-prev");
+  const nextBtn = state.quizContainer.querySelector(".mcq-next");
+  const submitBtn = state.quizContainer.querySelector(".mcq-submit-btn-single");
+
+  if (prevBtn) prevBtn.disabled = index === 0;
+  if (nextBtn) nextBtn.disabled = index === state.total - 1;
+
+  // Update submit button based on whether question is already answered
+  const currentItem = state.items[index];
+  if (currentItem && submitBtn) {
+    if (currentItem.dataset.answered === "true") {
+      submitBtn.textContent = "✓ Answered";
+      submitBtn.disabled = true;
+    } else {
+      submitBtn.textContent = "Submit Answer";
+      submitBtn.disabled = false;
+    }
+  }
+
+  // Check if all answered → show final score
+  checkAllAnswered();
+}
+
+function mcqNext() {
+  const state = getMCQState();
+  if (!state || state.current >= state.total - 1) return;
+  mcqShowQuestion(state.current + 1);
+}
+
+function mcqPrev() {
+  const state = getMCQState();
+  if (!state || state.current <= 0) return;
+  mcqShowQuestion(state.current - 1);
+}
+
+// Submit current question's answer
+function mcqSubmitCurrent() {
+  const state = getMCQState();
+  if (!state) return;
+
+  const currentItem = state.items[state.current];
+  if (!currentItem || currentItem.dataset.answered === "true") return;
+
+  const selected = currentItem.querySelector(".mcq-option.mcq-selected");
+  if (!selected) {
+    alert("Please select an answer first!");
+    return;
+  }
+
+  const correctIdx = parseInt(currentItem.dataset.correct);
+  const selectedIdx = parseInt(selected.dataset.opt);
+  const isCorrect = selectedIdx === correctIdx;
+
+  // Show correct/wrong styling
+  currentItem.querySelectorAll(".mcq-option-clickable").forEach(opt => {
+    const optIdx = parseInt(opt.dataset.opt);
+    if (optIdx === correctIdx) {
+      opt.classList.add("mcq-correct");
+    } else if (optIdx === selectedIdx) {
+      opt.classList.add("mcq-wrong");
+    }
+  });
+
+  // Show explanation
+  const explanation = currentItem.querySelector(".mcq-explanation");
+  if (explanation) explanation.classList.remove("mcq-explanation-hidden");
+
+  // Mark as answered
+  currentItem.dataset.answered = "true";
+  currentItem.dataset.correct_answer = isCorrect ? "1" : "0";
+
+  // Update submit button
+  const submitBtn = state.quizContainer.querySelector(".mcq-submit-btn-single");
+  if (submitBtn) {
+    submitBtn.textContent = isCorrect ? "✓ Correct!" : "✗ Incorrect";
+    submitBtn.disabled = true;
+    submitBtn.classList.toggle("mcq-submit-correct", isCorrect);
+    submitBtn.classList.toggle("mcq-submit-wrong", !isCorrect);
+  }
+
+  // Check if quiz complete
+  checkAllAnswered();
+
+  // Auto-advance to next after 1.5 seconds if not last question
+  setTimeout(() => {
+    if (state.current < state.total - 1) {
+      mcqNext();
+      // Reset submit button styling for next question
+      if (submitBtn) {
+        submitBtn.classList.remove("mcq-submit-correct", "mcq-submit-wrong");
+      }
+    }
+  }, 1500);
+}
+
+// Check if all questions answered → show final result
+function checkAllAnswered() {
+  const state = getMCQState();
+  if (!state) return;
+
+  let answered = 0;
+  let correct = 0;
+  state.items.forEach(item => {
+    if (item.dataset.answered === "true") {
+      answered++;
+      if (item.dataset.correct_answer === "1") correct++;
+    }
+  });
+
+  if (answered === state.total) {
+    const resultEl = document.getElementById("quizResult");
+    const pct = Math.round((correct / state.total) * 100);
+    let emoji = "🎉";
+    let msg = "Excellent!";
+    if (pct < 80) { emoji = "👍"; msg = "Good effort!"; }
+    if (pct < 50) { emoji = "📚"; msg = "Keep studying!"; }
+
+    if (resultEl && !resultEl.classList.contains("shown")) {
+      resultEl.innerHTML = `
+        <div class="quiz-result-content">
+          <div class="quiz-emoji">${emoji}</div>
+          <div class="quiz-stats">
+            <div class="quiz-score">${correct} / ${state.total}</div>
+            <div class="quiz-percent">${pct}% — ${msg}</div>
+          </div>
+        </div>
+      `;
+      resultEl.classList.remove("hidden");
+      resultEl.classList.add("shown");
+      setTimeout(() => resultEl.scrollIntoView({ behavior: "smooth", block: "center" }), 200);
+    }
+  }
+}
+
+// Returns HTML for the lesson plan section (used inside the content-lesson card)
+function renderLessonPlanHTML(markdown) {
+  const sections = parseMarkdownSections(markdown);
+  let html = "";
+
+  for (const section of sections) {
+    const key = section.title.toLowerCase().trim();
+
+    let config = { icon: "📄", color: "gray", title: section.title };
+    if (key.includes("objective"))   config = { icon: "🎯", color: "blue", title: section.title };
+    else if (key.includes("concept"))     config = { icon: "📚", color: "purple", title: section.title };
+    else if (key.includes("flow") || key.includes("plan") || key.includes("structure")) config = { icon: "⏱️", color: "orange", title: section.title, isFlow: true };
+    else if (key.includes("formula") || key.includes("equation") || key.includes("reaction")) config = { icon: "🧮", color: "green", title: section.title };
+    else if (key.includes("practice") || key.includes("problem") || key.includes("exercise")) config = { icon: "✏️", color: "pink", title: section.title };
+    else if (key.includes("discussion") || key.includes("question")) config = { icon: "💭", color: "teal", title: section.title };
+
+    if (config.isFlow) html += renderTimelineSection(section, config);
+    else html += renderRegularSection(section, config);
+  }
+
+  return html;
 }
 
 // ══════════════════════════════════════════════

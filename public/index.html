@@ -4,9 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TutAR Notebook — AI Lesson Plan Generator</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <link rel="stylesheet" href="style.css">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
 </head>
 <body>
 
@@ -82,6 +87,7 @@
 
   <!-- Main Content -->
   <div class="main">
+    <div class="main-inner">
 
     <!-- Welcome State -->
     <div id="welcomeState" class="welcome-state">
@@ -98,7 +104,7 @@
           <h2 id="selectedBookTitle">Book Title</h2>
           <p class="book-meta" id="selectedBookMeta">Class · Subject</p>
         </div>
-        <div style="display:flex; gap:8px;">
+        <div class="book-actions">
           <button class="btn-secondary" onclick="regenerateTopics()" id="regenTopicsBtn">🔄 Regenerate Topics</button>
           <button class="btn-delete" onclick="deleteCurrentBook()">Delete Book</button>
         </div>
@@ -138,6 +144,7 @@
           <div id="sourcesList" class="sources-list"></div>
         </div>
       </div>
+    </div>
     </div>
   </div>
 </div>
